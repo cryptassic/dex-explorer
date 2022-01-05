@@ -1,0 +1,157 @@
+
+import traceback
+import json
+import time
+import aiohttp
+
+from typing import List
+
+from models import Block,Transaction
+from utils import CustomLogger
+from utils.rpc_methods import GET_BLOCK_BY_NUMBER,GET_LAST_BLOCK
+
+class BlockExplorer:
+    def __init__(self, node_url: str = "https://api.mycryptoapi.com/eth"):
+        self._url = node_url
+        self._session = None
+        self._logger = CustomLogger()
+
+    async def _handler(self, response: aiohttp.ClientResponse) -> str:
+
+        response_text = None
+        if response.status == 200:
+            try:
+                response_json = await response.json()
+
+                if 'error' in response_json:
+                    error_message = response_json['error']['message']
+                    self._logger.error(f"{error_message}")
+
+                else:
+                    response_text = response_json['result']
+            except Exception as ex:
+                self._logger.error(f"{ex}")
+                traceback.print_exc()
+
+        return response_text
+
+    async def _call_rpc(self, request_data: str) -> str:
+        
+        if isinstance(request_data, dict):
+            request_data = json.dumps(request_data)
+
+        response_text = None
+
+        try:
+            if self._session:
+                async with self._session.post(url=self._url, data=request_data.encode('utf-8'), timeout=10) as response:
+                    response_text = await self._handler(response=response)
+            else:
+                async with aiohttp.ClientSession(headers={"Content-Type": "application/json"}) as session:
+                    async with session.post(url=self._url, data=request_data.encode('utf-8'), timeout=10) as response:
+                        response_text = await self._handler(response=response)
+
+        except Exception as ex:
+            self._logger.error(f"{ex}")
+            traceback.print_exc()
+
+        return response_text
+
+    async def _preprocess_block(self, block_transactions_data: List[dict], validation_block_hash: str) -> List[Transaction]:
+        block_transactions = []
+        for transaction in block_transactions_data:
+
+            if transaction['blockHash'] != validation_block_hash:
+                raise Exception(
+                    f"Block hash mismatch, expected:{validation_block_hash} got:{transaction['blockHash']}")
+
+            transaction_object = Transaction(
+                block_hash=transaction['blockHash'],
+                from_address=transaction['from'],
+                to_address=transaction['to'],
+                hash=transaction['hash'],
+                input=transaction['input'],
+                block_number=int(transaction['blockNumber'], 0),
+                gas=int(transaction['gas'], 0),
+                gas_price=int(transaction['gasPrice'], 0),
+                nonce=int(transaction['nonce'], 0),
+                tx_index=int(transaction['transactionIndex'], 0),
+                value=int(transaction['value'], 0),
+                type=int(transaction['type'],0)
+            )
+
+            block_transactions.append(transaction_object)
+
+        return block_transactions
+
+    async def get_block(self, block_number: int, include_transactions: bool = True) -> Block:
+
+        block = None
+        process_data_time = None
+        get_data_time = None
+
+        if block_number <= 0:
+            self._logger.error(f"param: block_number <= 0")
+            return None
+
+        start_time = time.perf_counter()
+
+        call_data = GET_BLOCK_BY_NUMBER
+        call_data['params'] = [hex(block_number), include_transactions]
+
+        call_result = await self._call_rpc(request_data=call_data)
+
+        get_data_time = time.perf_counter() - start_time
+
+        start_time = time.perf_counter()
+        if call_result:
+            try:
+                response_block_number = int(call_result['number'], 0)
+
+                if response_block_number != block_number:
+                    raise Exception(
+                        f"Block numbers mismatch, expected:{block_number} got:{response_block_number}")
+
+                block_timestamp = int(call_result['timestamp'], 0)
+                block_size = int(call_result['size'], 0)
+                block_hash = call_result['hash']
+
+                # Converting JSON object to defined Transaction object
+                block_transactions = await self._preprocess_block(
+                    call_result['transactions'], validation_block_hash=block_hash)
+
+            except Exception as ex:
+                self._logger.error(f"{ex}")
+                traceback.print_exc()
+
+            else:
+                if len(block_transactions) == 0:
+                    self._logger.warning(f"Block:{block_number} Empty")
+
+                block = Block(hash=block_hash, number=block_number, size=block_size,
+                              timestamp=block_timestamp, transactions=block_transactions)
+
+                process_data_time = time.perf_counter() - start_time
+
+                self._logger.info(
+                    f"Block:{block_number} Size:{block_size} Tx_Count:{len(block.transactions)} Time -> Get:{get_data_time:.4f} Process:{process_data_time:.4f}")
+
+        return block
+
+    async def get_latest_block(self) -> int:
+
+        latest_block = None
+
+        call_data = json.dumps(GET_LAST_BLOCK)
+        call_result = await self._call_rpc(request_data=call_data)
+
+        if call_result:
+            try:
+                latest_block = int(call_result, 0)
+            except Exception as ex:
+                self._logger.error(f"{ex}")
+                traceback.print_exc()
+
+        return latest_block
+
+

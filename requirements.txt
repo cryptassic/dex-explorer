@@ -1,0 +1,5 @@
+coloredlogs==15.0.1
+aiohttp==3.8.1
+asyncio==3.4.3
+web3==5.25.0
+ciso8601==2.2.0
